@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4003";
 
 export default function IngestPage() {
   const [uploading, setUploading] = useState(false);

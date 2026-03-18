@@ -96,7 +96,7 @@ type ExtractResponse = {
   biomarkers: Biomarker[];
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4003";
 
 type BiomarkerExplanation = {
   name: string;
@@ -114,11 +114,9 @@ type BiomarkerExplanation = {
 function BiomarkerSlider({
   b,
   onClick,
-  overlay,
 }: {
   b: Biomarker;
   onClick: () => void;
-  overlay?: BiomarkerWhoopOverlay | null;
 }) {
   const refMin = b.refMin ?? null;
   const refMax = b.refMax ?? null;
@@ -189,19 +187,6 @@ function BiomarkerSlider({
         </div>
       )}
 
-      {overlay && overlay.points.length > 1 && (
-        <div className="mt-3 h-44">
-          <TrendOverlayMiniChart overlay={overlay} />
-        </div>
-      )}
-
-      {overlay &&
-        overlay.points.length > 1 &&
-        !overlay.points.some((p) => p.whoopValue != null) && (
-          <p className="mt-1 text-[10px] text-slate-500">
-            WHOOP data missing for these dates (connect WHOOP and ensure data has synced).
-          </p>
-        )}
     </div>
   );
 }
@@ -303,6 +288,12 @@ export default function DataPage() {
   const [explanation, setExplanation] = useState<BiomarkerExplanation | null>(
     null
   );
+  const [personalInsight, setPersonalInsight] = useState<any | null>(null);
+  const [personalInsightLoading, setPersonalInsightLoading] =
+    useState<boolean>(false);
+  const [personalInsightError, setPersonalInsightError] = useState<
+    string | null
+  >(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -327,6 +318,15 @@ export default function DataPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const isDeficient = (status?: string | null) => {
+    const s = (status || "").toLowerCase().trim();
+    // Be resilient to missing/async status: if status isn't present, still show
+    // the recommendations (backend always returns productRecommendations).
+    if (!s) return true;
+    // Only hide for explicitly normal range.
+    return s !== "normal";
   };
 
   useEffect(() => {
@@ -388,16 +388,21 @@ export default function DataPage() {
         );
         const whoopJson = await whoopRes.json().catch(() => ({}));
         if (!whoopRes.ok) {
-          throw new Error(
-            whoopJson.message ||
-              whoopJson.error ||
-              "Failed to load WHOOP history"
+          // WHOOP overlap is optional; don't block the rest of the page.
+          console.warn(
+            "WHOOP history load failed:",
+            whoopJson.message || whoopJson.error || whoopRes.status
           );
+          setWhoopTrendRaw(null);
+          return;
         }
 
         setWhoopTrendRaw(whoopJson?.raw ?? whoopJson ?? null);
       } catch (e: unknown) {
-        setTrendError(e instanceof Error ? e.message : "Request failed");
+        // WHOOP overlap is best-effort; keep UI usable even if it fails.
+        console.warn("WHOOP history request error (non-fatal):", e);
+        setWhoopTrendRaw(null);
+        setTrendError(null);
       } finally {
         setTrendLoading(false);
       }
@@ -428,6 +433,14 @@ export default function DataPage() {
     setInfoError(null);
     setInfoOpen(true);
     setInfoLoading(true);
+    setPersonalInsight(null);
+    setPersonalInsightError(null);
+    setPersonalInsightLoading(true);
+
+    const overlapForThis =
+      trendLoading || !mockTrends || !whoopTrendRaw
+        ? null
+        : getOverlayForBiomarker(b);
     try {
       const res = await fetch(`${API_BASE}/api/biomarker/explain`, {
         method: "POST",
@@ -449,6 +462,46 @@ export default function DataPage() {
       setInfoError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setInfoLoading(false);
+    }
+
+    try {
+      const personalRes = await fetch(
+        `${API_BASE}/api/biomarker/personal-insight`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            biomarker: {
+              name: b.name,
+              status: b.status,
+              unit: b.unit,
+              referenceRange: b.referenceRange,
+              category: b.category,
+              value: b.value,
+            },
+            whoopOverlay: overlapForThis
+              ? { whoopMetricLabel: overlapForThis.whoopMetricLabel, points: overlapForThis.points }
+              : { whoopMetricLabel: "", points: [] },
+          }),
+        }
+      );
+      const personalJson = (await personalRes.json()) as {
+        personalInsight?: any;
+        error?: string;
+      };
+      if (!personalRes.ok) {
+        throw new Error(
+          personalJson.error ||
+            "Failed to load personal insight for this biomarker"
+        );
+      }
+      setPersonalInsight(personalJson.personalInsight ?? null);
+    } catch (e: unknown) {
+      setPersonalInsightError(
+        e instanceof Error ? e.message : "Request failed"
+      );
+    } finally {
+      setPersonalInsightLoading(false);
     }
   };
 
@@ -474,6 +527,84 @@ export default function DataPage() {
   const activeBiomarkers = bySection[active] ?? [];
   const title = SECTIONS.find((s) => s.id === active)?.label ?? "Records";
   const blurb = SECTION_BLURBS[active] ?? SECTION_BLURBS.summary;
+
+  function statusToScore(status?: string): number {
+    const s = (status || "").toString().toLowerCase();
+    if (s === "normal") return 100;
+    if (s === "borderline") return 75;
+    if (s === "high" || s === "low") return 50;
+    // If the extraction produced an unexpected status string, don't overly
+    // penalize; treat as “unknown but not clearly abnormal”.
+    return 60;
+  }
+
+  function computeHealthScore(
+    items: Biomarker[]
+  ): { score: number; counted: number } | null {
+    const withStatus = items.filter(
+      (b) => typeof b.status === "string" && b.status.trim().length > 0
+    );
+    if (!withStatus.length) return null;
+    const sum = withStatus.reduce((acc, b) => acc + statusToScore(b.status), 0);
+    return { score: Math.round(sum / withStatus.length), counted: withStatus.length };
+  }
+
+  const overallScore = useMemo(
+    () => computeHealthScore(biomarkers),
+    [biomarkers]
+  );
+  const categoryScore = useMemo(
+    () => computeHealthScore(activeBiomarkers),
+    [activeBiomarkers]
+  );
+  const displayedScore = active === "summary" ? overallScore : categoryScore;
+
+  function scoreToLevel(score: number): "good" | "ok" | "bad" {
+    if (score >= 85) return "good";
+    if (score >= 70) return "ok";
+    return "bad";
+  }
+
+  function ScoreMeter({
+    score,
+  }: {
+    score: number;
+  }): React.ReactNode {
+    const level = scoreToLevel(score);
+    const fillPct = Math.max(0, Math.min(100, score));
+
+    const track =
+      level === "good"
+        ? "bg-emerald-100"
+        : level === "ok"
+          ? "bg-amber-100"
+          : "bg-rose-100";
+    const fill =
+      level === "good"
+        ? "bg-emerald-500"
+        : level === "ok"
+          ? "bg-amber-500"
+          : "bg-rose-500";
+
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+            Health score
+          </span>
+          <span className="text-[11px] font-semibold text-slate-700">
+            {score}/100
+          </span>
+        </div>
+        <div className={`h-2 w-full overflow-hidden rounded-full ${track}`}>
+          <div
+            className={`h-full ${fill}`}
+            style={{ width: `${fillPct}%` }}
+          />
+        </div>
+      </div>
+    );
+  }
 
   const sleepHoursByDate = useMemo(() => {
     const map: Record<string, number> = {};
@@ -540,6 +671,164 @@ export default function DataPage() {
     return map;
   }, [whoopTrendRaw]);
 
+  const sleepScoreByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (!Array.isArray(sleepArr)) return map;
+    for (const s of sleepArr) {
+      const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+      if (!date) continue;
+      const v = s?.score;
+      if (v == null) continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) map[date] = n;
+    }
+    return map;
+  }, [whoopTrendRaw]);
+
+  const sleepEfficiencyByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (!Array.isArray(sleepArr)) return map;
+    for (const s of sleepArr) {
+      const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+      if (!date) continue;
+      const v = s?.efficiency;
+      if (v == null) continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) map[date] = n;
+    }
+    return map;
+  }, [whoopTrendRaw]);
+
+  const sleepHrvByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (!Array.isArray(sleepArr)) return map;
+    for (const s of sleepArr) {
+      const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+      if (!date) continue;
+      const v = s?.average_hrv;
+      if (v == null) continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) map[date] = n;
+    }
+    return map;
+  }, [whoopTrendRaw]);
+
+  const sleepRespRateByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (!Array.isArray(sleepArr)) return map;
+    for (const s of sleepArr) {
+      const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+      if (!date) continue;
+      const v = s?.respiratory_rate;
+      if (v == null) continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) map[date] = n;
+    }
+    return map;
+  }, [whoopTrendRaw]);
+
+  const remHoursByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (!Array.isArray(sleepArr)) return map;
+    for (const s of sleepArr) {
+      const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+      if (!date) continue;
+      const v = s?.rem;
+      if (v == null) continue;
+      const hours = Number(v) / 3600;
+      if (Number.isFinite(hours)) map[date] = hours;
+    }
+    return map;
+  }, [whoopTrendRaw]);
+
+  const deepHoursByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (!Array.isArray(sleepArr)) return map;
+    for (const s of sleepArr) {
+      const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+      if (!date) continue;
+      const v = s?.deep;
+      if (v == null) continue;
+      const hours = Number(v) / 3600;
+      if (Number.isFinite(hours)) map[date] = hours;
+    }
+    return map;
+  }, [whoopTrendRaw]);
+
+  const restingHrByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+
+    // Prefer resting HR from activity if present; otherwise fall back to sleep hr_resting.
+    const activityArr =
+      whoopTrendRaw?.activity?.activity ||
+      whoopTrendRaw?.activity ||
+      whoopTrendRaw?.daily?.activity ||
+      [];
+    if (Array.isArray(activityArr)) {
+      for (const a of activityArr) {
+        const date =
+          a?.calendar_date ||
+          (typeof a?.date === "string" ? a.date.slice(0, 10) : null);
+        if (!date) continue;
+        const v = a?.heart_rate?.resting_bpm;
+        if (v == null) continue;
+        const n = Number(v);
+        if (Number.isFinite(n)) map[date] = n;
+      }
+    }
+
+    const sleepArr =
+      whoopTrendRaw?.sleep?.sleep ||
+      whoopTrendRaw?.sleep ||
+      whoopTrendRaw?.daily?.sleep ||
+      [];
+    if (Array.isArray(sleepArr)) {
+      for (const s of sleepArr) {
+        const date =
+          s?.calendar_date ||
+          (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
+        if (!date) continue;
+        if (map[date] != null) continue;
+        const v = s?.hr_resting;
+        if (v == null) continue;
+        const n = Number(v);
+        if (Number.isFinite(n)) map[date] = n;
+      }
+    }
+
+    return map;
+  }, [whoopTrendRaw]);
+
   const ymdRe = /^\d{4}-\d{2}-\d{2}$/;
 
   const overlapDates = useMemo(() => {
@@ -561,7 +850,17 @@ export default function DataPage() {
     s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
   const whoopMetricForBiomarker = (b: Biomarker): {
-    key: "steps" | "sleep_hours" | "avg_bpm";
+    key:
+      | "steps"
+      | "sleep_hours"
+      | "avg_bpm"
+      | "sleep_score"
+      | "sleep_efficiency"
+      | "sleep_hrv"
+      | "sleep_resp_rate"
+      | "rem_hours"
+      | "deep_hours"
+      | "resting_hr";
     label: string;
   } => {
     const cat = (b.category || "").toLowerCase();
@@ -569,10 +868,19 @@ export default function DataPage() {
 
     if (cat === "heart") return { key: "avg_bpm", label: "Avg BPM" };
     if (n.includes("vitamin d")) {
-      return { key: "sleep_hours", label: "Sleep hours" };
+      return { key: "sleep_hours", label: "Sleep hours (h)" };
     }
-    if (cat === "sex" || cat === "thyroid" || cat === "inflammation") {
-      return { key: "sleep_hours", label: "Sleep hours" };
+    if (cat === "inflammation") {
+      return { key: "sleep_hrv", label: "Sleep HRV" };
+    }
+    if (cat === "metabolic") {
+      return { key: "sleep_efficiency", label: "Sleep efficiency (%)" };
+    }
+    if (cat === "sex" || cat === "thyroid") {
+      return { key: "sleep_score", label: "Sleep score" };
+    }
+    if (cat === "liver" || cat === "kidney" || cat === "immune") {
+      return { key: "resting_hr", label: "Resting HR (bpm)" };
     }
     return { key: "steps", label: "Steps" };
   };
@@ -636,7 +944,23 @@ export default function DataPage() {
           ? stepsByDate[date] ?? null
           : metric.key === "sleep_hours"
             ? sleepHoursByDate[date] ?? null
-            : avgBpmByDate[date] ?? null;
+            : metric.key === "avg_bpm"
+              ? avgBpmByDate[date] ?? null
+              : metric.key === "sleep_score"
+                ? sleepScoreByDate[date] ?? null
+                : metric.key === "sleep_efficiency"
+                  ? sleepEfficiencyByDate[date] ?? null
+                  : metric.key === "sleep_hrv"
+                    ? sleepHrvByDate[date] ?? null
+                    : metric.key === "sleep_resp_rate"
+                      ? sleepRespRateByDate[date] ?? null
+                      : metric.key === "rem_hours"
+                        ? remHoursByDate[date] ?? null
+                        : metric.key === "deep_hours"
+                          ? deepHoursByDate[date] ?? null
+                          : metric.key === "resting_hr"
+                            ? restingHrByDate[date] ?? null
+                            : null;
 
       return {
         date,
@@ -653,6 +977,12 @@ export default function DataPage() {
       points,
     } satisfies BiomarkerWhoopOverlay;
   };
+
+  const overlayForSelected = selected
+    ? trendLoading
+      ? null
+      : getOverlayForBiomarker(selected)
+    : null;
 
   return (
     <div className="flex w-full gap-8">
@@ -698,6 +1028,24 @@ export default function DataPage() {
             <h1 className="text-sm font-semibold text-slate-900">{title}</h1>
             <p className="mt-3 max-w-md text-xs text-slate-500">{blurb}</p>
 
+            {!loading && displayedScore && (
+              <div className="mt-3 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-700">
+                      {active === "summary" ? "Overall health score" : "Category score"}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500">
+                      Based on {displayedScore.counted} markers
+                    </div>
+                  </div>
+                  <div className="w-40">
+                    <ScoreMeter score={displayedScore.score} />
+                  </div>
+                </div>
+              </div>
+            )}
+
             {loading && (
               <p className="mt-4 text-xs text-slate-500">
                 Extracting biomarkers from PDF reports…
@@ -736,7 +1084,6 @@ export default function DataPage() {
                     key={`${b.name}-${b.value}-${b.unit}`}
                     b={b}
                     onClick={() => openInfo(b)}
-                    overlay={trendLoading ? null : getOverlayForBiomarker(b)}
                   />
                 ))}
               </div>
@@ -808,6 +1155,214 @@ export default function DataPage() {
                     <p className="mt-1 text-sm text-slate-700">
                       {explanation.whyItMatters}
                     </p>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      WHOOP overlap trend
+                    </h3>
+                    {trendLoading && (
+                      <p className="mt-2 text-sm text-slate-700">
+                        Loading WHOOP history…
+                      </p>
+                    )}
+                    {!trendLoading && overlayForSelected?.points?.length ? (
+                      <div className="mt-2 h-72">
+                        <TrendOverlayMiniChart overlay={overlayForSelected} />
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm text-slate-700">
+                        No WHOOP overlap data available for this biomarker’s trend window.
+                      </p>
+                    )}
+
+                    {!trendLoading &&
+                      overlayForSelected?.points?.some((p) => p.whoopValue == null) && (
+                        <p className="mt-2 text-xs text-slate-600">
+                          Some overlap dates are missing WHOOP data. Connect WHOOP in Junction and refresh.
+                        </p>
+                      )}
+                  </div>
+
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-slate-900 text-white shadow-sm">
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 24 24"
+                          width="16"
+                          height="16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M12 2l1.2 4.3L18 8l-4.8 1.7L12 14l-1.2-4.3L6 8l4.8-1.7L12 2z" />
+                          <path d="M20 14l.7 2.3L23 17l-2.3.7L20 20l-.7-2.3L17 17l2.3-.7L20 14z" />
+                        </svg>
+                      </span>
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        Personal Insight
+                      </h3>
+                    </div>
+
+                    {personalInsightLoading && (
+                      <div className="mt-2 flex items-center gap-2 text-sm text-slate-700">
+                        <span className="inline-flex h-5 w-5 items-center justify-center">
+                          <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-200 border-t-slate-900" />
+                        </span>
+                        Generating personalized trend insight…
+                      </div>
+                    )}
+
+                    {personalInsightError && (
+                      <p className="mt-2 text-sm font-medium text-red-600">
+                        {personalInsightError}
+                      </p>
+                    )}
+
+                    {!personalInsightLoading &&
+                      !personalInsightError &&
+                      personalInsight && (
+                        <div className="mt-2 space-y-3">
+                          {personalInsight.summary && (
+                            <p className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-slate-800">
+                              {personalInsight.summary}
+                            </p>
+                          )}
+
+                          {personalInsight.trendExplanation && (
+                            <p className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-slate-800">
+                              {personalInsight.trendExplanation}
+                            </p>
+                          )}
+
+                          {Array.isArray(
+                            personalInsight.productRecommendations
+                          ) &&
+                            personalInsight.productRecommendations.length > 0 && (
+                              <div>
+                                <p className="text-xs font-semibold text-slate-900">
+                                  Supplements / products
+                                </p>
+                                <ul className="mt-1 list-disc pl-5 text-sm text-slate-700">
+                                  {personalInsight.productRecommendations.map(
+                                    (p: any, idx: number) => {
+                                      const name =
+                                        p?.name || "Recommended item";
+                                      const rationale = p?.rationale || "";
+                                      const url = p?.url;
+                                      const important =
+                                        idx === 0 ||
+                                        /rationale|because|helps|support/i.test(
+                                          rationale
+                                        );
+                                      return (
+                                        <li
+                                          key={`${idx}-${name}`}
+                                          className={
+                                            important
+                                              ? "mt-1 rounded-md bg-emerald-50 px-1 py-0.5"
+                                              : undefined
+                                          }
+                                        >
+                                          {url ? (
+                                            <a
+                                              href={url}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="font-medium underline decoration-slate-300 underline-offset-2 hover:decoration-slate-700"
+                                            >
+                                              {name}
+                                            </a>
+                                          ) : (
+                                            <span className="font-medium">
+                                              {name}
+                                            </span>
+                                          )}
+                                          {rationale ? ` — ${rationale}` : ""}
+                                        </li>
+                                      );
+                                    }
+                                  )}
+                                </ul>
+                              </div>
+                            )}
+
+                          {Array.isArray(personalInsight.practicalAdvice) &&
+                            personalInsight.practicalAdvice.length > 0 && (
+                              <div>
+                                <p className="text-xs font-semibold text-slate-900">
+                                  Practical advice
+                                </p>
+                                <ul className="mt-1 list-disc pl-5 text-sm text-slate-700">
+                                  {personalInsight.practicalAdvice.map(
+                                    (a: string, idx: number) => {
+                                      const important =
+                                        idx === 0 ||
+                                        /sleep|activity|nutrition|clinician|focus|repeat|timing|consistency/i.test(
+                                          a || ""
+                                        );
+                                      return (
+                                        <li
+                                          key={`${idx}-${a}`}
+                                          className={
+                                            important
+                                              ? "mt-1 rounded-md bg-yellow-50 px-1 py-0.5"
+                                              : undefined
+                                          }
+                                        >
+                                          {a}
+                                        </li>
+                                      );
+                                    }
+                                  )}
+                                </ul>
+                              </div>
+                            )}
+
+                          {Array.isArray(personalInsight.clinicianQuestions) &&
+                            personalInsight.clinicianQuestions.length > 0 && (
+                              <div>
+                                <p className="text-xs font-semibold text-slate-900">
+                                  Questions for your clinician
+                                </p>
+                                <ul className="mt-1 list-disc pl-5 text-sm text-slate-700">
+                                  {personalInsight.clinicianQuestions.map(
+                                    (q: string, idx: number) => (
+                                      <li
+                                        key={`${idx}-${q}`}
+                                        className={
+                                          idx === 0
+                                            ? "mt-1 rounded-md bg-rose-50 px-1 py-0.5"
+                                            : undefined
+                                        }
+                                      >
+                                        {q}
+                                      </li>
+                                    )
+                                  )}
+                                </ul>
+                              </div>
+                            )}
+
+                          {personalInsight.disclaimer && (
+                            <p className="text-xs text-slate-500">
+                              {personalInsight.disclaimer}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                    {!personalInsightLoading &&
+                      !personalInsightError &&
+                      !personalInsight && (
+                        <p className="mt-2 text-sm text-slate-700">
+                          Personal insight will appear after the trend overlap loads.
+                        </p>
+                      )}
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-2">
