@@ -24,6 +24,20 @@ export default function ProductsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const handleAnalyze = async () => {
+    const stored =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("vg:lastAnalysis")
+        : null;
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as InsightResponse;
+        setData(parsed);
+        return;
+      } catch {
+        // fall through to backend call
+      }
+    }
+
     const lastId =
       typeof window !== "undefined"
         ? window.localStorage.getItem("vg:lastReportId")

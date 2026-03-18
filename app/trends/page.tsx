@@ -45,6 +45,20 @@ export default function TrendsPage() {
   }, [data]);
 
   const handleAnalyze = async () => {
+    const stored =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("vg:lastAnalysis")
+        : null;
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as InsightResponse;
+        setData(parsed);
+        return;
+      } catch {
+        // fall through to backend call
+      }
+    }
+
     const lastId =
       typeof window !== "undefined"
         ? window.localStorage.getItem("vg:lastReportId")

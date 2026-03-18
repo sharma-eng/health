@@ -46,12 +46,33 @@ export default function IngestPage() {
 
       const json = await res.json();
       const reportId = json?.report?.id as string | undefined;
+
       if (reportId) {
         if (typeof window !== "undefined") {
           window.localStorage.setItem("vg:lastReportId", reportId);
         }
+
+        // Immediately fetch insights once and cache them in localStorage
+        try {
+          const analyzeRes = await fetch(
+            `${API_BASE}/api/reports/${reportId}/analyze`,
+            { method: "POST" }
+          );
+          if (analyzeRes.ok) {
+            const analysis = await analyzeRes.json();
+            if (typeof window !== "undefined") {
+              window.localStorage.setItem(
+                "vg:lastAnalysis",
+                JSON.stringify(analysis)
+              );
+            }
+          }
+        } catch {
+          // Swallow analysis errors here; pages can still call backend directly.
+        }
+
         setSuccess(
-          "Report uploaded. Insights, Trends, and Products will use this latest report automatically."
+          "Report uploaded and analyzed. Insights, Trends, and Products will load instantly from this report."
         );
       } else {
         setSuccess("Report uploaded successfully.");

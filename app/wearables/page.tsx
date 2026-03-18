@@ -5,15 +5,16 @@ import { useState } from "react";
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
 
-type WearableStub = {
+type WearableResponse = {
   provider: string;
   status: string;
-  message: string;
+  message?: string;
+  raw?: unknown;
 };
 
 export default function WearablesPage() {
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<WearableStub | null>(null);
+  const [data, setData] = useState<WearableResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleLoad = async () => {
@@ -21,12 +22,11 @@ export default function WearablesPage() {
     setError(null);
     try {
       const res = await fetch(`${API_BASE}/api/wearables/whoop`);
+      const json = await res.json();
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || "Failed to load wearable status");
+        throw new Error(json.error || "Failed to load wearable status");
       }
-      const json = (await res.json()) as WearableStub;
-      setData(json);
+      setData(json as WearableResponse);
     } catch (e: any) {
       setError(e.message || "Failed to load wearable status");
     } finally {
@@ -42,7 +42,7 @@ export default function WearablesPage() {
         </h1>
         <p className="max-w-2xl text-sm text-slate-300/80 sm:text-base">
           Connect continuous data streams like Whoop sleep, recovery, and
-          strain, via Junction Health&apos;s API, and align them with slow
+          strain via Junction Health&apos;s API, and align them with slow
           moving biomarkers.
         </p>
       </header>
@@ -50,8 +50,9 @@ export default function WearablesPage() {
       <section className="glass-panel flex flex-col gap-4 p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-slate-300/85">
-            This page is wired to the backend stub for the Junction Health API.
-            Swap in real credentials and OAuth flows to light it up.
+            This page calls your backend&apos;s Junction Health integration.
+            Use Junction Link to connect Whoop for your Junction user, then
+            pull live data here.
           </p>
           <button
             onClick={handleLoad}
@@ -74,7 +75,16 @@ export default function WearablesPage() {
               <p className="mt-1 text-[11px] text-emerald-300">
                 Status: {data.status}
               </p>
-              <p className="mt-2 text-xs text-slate-300/90">{data.message}</p>
+              {data.message && (
+                <p className="mt-2 text-xs text-slate-300/90">
+                  {data.message}
+                </p>
+              )}
+              {data.raw && (
+                <pre className="mt-3 max-h-64 overflow-auto rounded-xl bg-slate-900/70 p-3 text-[10px] text-slate-200">
+                  {JSON.stringify(data.raw, null, 2)}
+                </pre>
+              )}
             </>
           ) : (
             <ul className="list-disc space-y-1 pl-4 text-xs text-slate-300/85">
