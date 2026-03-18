@@ -32,9 +32,17 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!backend/.env.example
 
 # vercel
 .vercel
+
+# backend (vendored into this repo for deployment)
+backend/node_modules/
+backend/reports/.ocr_cache/
+backend/reports/.biomarker_cache/
+backend/reports/.biomarker_explain_cache/
+backend/reports/.biomarker_personal_insight_cache/
 
 # typescript
 *.tsbuildinfo
