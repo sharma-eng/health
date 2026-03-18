@@ -142,9 +142,11 @@ export default function WhoopPage() {
   const latestActivity = activityList[activityList.length - 1];
   const latestSleep = sleepList[sleepList.length - 1];
   const sleepHours =
-    latestSleep?.total_sleep_duration != null
-      ? (latestSleep.total_sleep_duration / 3600).toFixed(1)
-      : null;
+    latestSleep?.total != null
+      ? (latestSleep.total / 3600).toFixed(1)
+      : latestSleep?.total_sleep_duration != null
+        ? (latestSleep.total_sleep_duration / 3600).toFixed(1)
+        : null;
   const isEmpty = sleepList.length === 0 && activityList.length === 0;
 
   const sleepChart = sleepList
@@ -152,7 +154,11 @@ export default function WhoopPage() {
       const d = s.calendar_date || (typeof s.date === "string" ? s.date.slice(0, 10) : null);
       if (!d) return null;
       const hours =
-        s.total_sleep_duration != null ? s.total_sleep_duration / 3600 : null;
+        s.total != null
+          ? s.total / 3600
+          : s.total_sleep_duration != null
+            ? s.total_sleep_duration / 3600
+            : null;
       return { date: d, hours };
     })
     .filter(Boolean)

@@ -344,7 +344,7 @@ export default function DataPage() {
       try {
         const trendsRes = await fetch(
           `${API_BASE}/api/reports/static/report1/analyze`,
-          { method: "POST" }
+          { method: "POST", cache: "no-store" }
         );
         const trendsJson = await trendsRes.json().catch(() => ({}));
         if (!trendsRes.ok) {
@@ -383,7 +383,8 @@ export default function DataPage() {
         const start_date = earliest > startCapYmd ? earliest : startCapYmd;
 
         const whoopRes = await fetch(
-          `${API_BASE}/api/wearables/whoop?start_date=${start_date}&end_date=${end_date}`
+          `${API_BASE}/api/wearables/whoop?start_date=${start_date}&end_date=${end_date}`,
+          { cache: "no-store" }
         );
         const whoopJson = await whoopRes.json().catch(() => ({}));
         if (!whoopRes.ok) {
@@ -486,7 +487,7 @@ export default function DataPage() {
     for (const s of sleepArr) {
       const date = s?.calendar_date || (typeof s?.date === "string" ? s.date.slice(0, 10) : null);
       if (!date) continue;
-      const raw = s?.total_sleep_duration;
+      const raw = s?.total != null ? s.total : s?.total_sleep_duration;
       if (raw == null) continue;
       const hours = Number(raw) / 3600;
       if (Number.isFinite(hours)) map[date] = hours;
@@ -552,16 +553,24 @@ export default function DataPage() {
 
     const unique = Array.from(new Set(dates));
     unique.sort();
-    // Keep it small for performance/legibility.
-    return unique.slice(-7);
+    // Use the full mocked report date range.
+    return unique;
   }, [mockTrends]);
+
+  const normalizeName = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
   const whoopMetricForBiomarker = (b: Biomarker): {
     key: "steps" | "sleep_hours" | "avg_bpm";
     label: string;
   } => {
     const cat = (b.category || "").toLowerCase();
+    const n = normalizeName(b.name);
+
     if (cat === "heart") return { key: "avg_bpm", label: "Avg BPM" };
+    if (n.includes("vitamin d")) {
+      return { key: "sleep_hours", label: "Sleep hours" };
+    }
     if (cat === "sex" || cat === "thyroid" || cat === "inflammation") {
       return { key: "sleep_hours", label: "Sleep hours" };
     }
@@ -588,11 +597,28 @@ export default function DataPage() {
     const normalize = (s: string) =>
       s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-    const bNorm = normalize(b.name);
-    const trendForName = mockTrends?.find((t) => {
-      const tNorm = normalize(t.biomarker);
-      return bNorm.includes(tNorm) || tNorm.includes(bNorm);
-    });
+    const coreKey = (s: string) => {
+      const n = normalize(s);
+      if (n.includes("vitamin d")) return "vitamin d";
+      if (n.includes("ldl")) return "ldl";
+      if (n.includes("hdl")) return "hdl";
+      if (n.includes("triglycer")) return "triglycerides";
+      if (n.includes("testosterone")) return "testosterone";
+      if (n.includes("estradiol") || n.includes("estradi")) return "estradiol";
+      if (n.includes("tsh")) return "tsh";
+      if (n.includes("free t4") || n.includes("ft4")) return "free t4";
+      if (n.includes("free t3") || n.includes("ft3")) return "free t3";
+      return null;
+    };
+
+    const bCore = coreKey(b.name);
+    const trendForName = bCore
+      ? mockTrends?.find((t) => coreKey(t.biomarker) === bCore) ?? null
+      : mockTrends?.find((t) => {
+          const tNorm = normalize(t.biomarker);
+          const bNorm = normalize(b.name);
+          return bNorm.includes(tNorm) || tNorm.includes(bNorm);
+        }) ?? null;
 
     const trendByDate: Record<string, number> = {};
     for (const p of trendForName?.points || []) {
@@ -688,6 +714,19 @@ export default function DataPage() {
             {!loading && !error && activeBiomarkers.length === 0 && (
               <p className="mt-4 text-xs text-slate-500">
                 No biomarkers in this section. Upload PDF reports to the backend reports folder and ensure OPENAI_API_KEY is set.
+              </p>
+            )}
+            {!trendLoading && overlapDates.length > 0 && (
+              <p className="mt-3 text-[11px] text-slate-500">
+                Overlap window: {overlapDates.join(", ")} · WHOOP sleep records:{" "}
+                {Array.isArray(whoopTrendRaw?.sleep?.sleep)
+                  ? whoopTrendRaw.sleep.sleep.length
+                  : 0}
+                {" · "}
+                WHOOP activity records:{" "}
+                {Array.isArray(whoopTrendRaw?.activity?.activity)
+                  ? whoopTrendRaw.activity.activity.length
+                  : 0}
               </p>
             )}
             {!loading && activeBiomarkers.length > 0 && (
