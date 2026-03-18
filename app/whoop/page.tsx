@@ -1,6 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
@@ -16,33 +24,46 @@ export default function WhoopPage() {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<WhoopResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorDetails, setErrorDetails] = useState<any | null>(null);
   const [providers, setProviders] = useState<any[] | null>(null);
   const [providersLoading, setProvidersLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const endDefault = new Date();
+  const startDefault = new Date(endDefault);
+  startDefault.setDate(startDefault.getDate() - 30);
+  const [startDate, setStartDate] = useState(startDefault.toISOString().slice(0, 10));
+  const [endDate, setEndDate] = useState(endDefault.toISOString().slice(0, 10));
+
+  async function loadHistory(rangeStart: string, rangeEnd: string) {
+    setHistoryLoading(true);
+    setError(null);
+    setErrorDetails(null);
+    try {
+      const url = new URL(`${API_BASE}/api/wearables/whoop`);
+      url.searchParams.set("start_date", rangeStart);
+      url.searchParams.set("end_date", rangeEnd);
+
+      const res = await fetch(url.toString());
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = json.message || json.error || "Failed to load WHOOP history";
+        setErrorDetails(json.details || null);
+        throw new Error(msg);
+      }
+      setData(json as WhoopResponse);
+    } catch (e: any) {
+      setError(e.message || "Failed to load WHOOP history");
+    } finally {
+      setHistoryLoading(false);
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(`${API_BASE}/api/wearables/whoop`);
-        const json = await res.json();
-        if (!res.ok) {
-          const msg =
-            json.message ||
-            json.error ||
-            (json.details?.message ? `${json.error}: ${json.details.message}` : "Failed to load WHOOP data");
-          throw new Error(msg);
-        }
-        setData(json as WhoopResponse);
-      } catch (e: any) {
-        setError(e.message || "Failed to load WHOOP data");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    load();
+    loadHistory(startDate, endDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -118,12 +139,34 @@ export default function WhoopPage() {
     : Array.isArray(raw?.activity)
       ? raw.activity
       : [];
-  const latestSleep = sleepList[sleepList.length - 1];
   const latestActivity = activityList[activityList.length - 1];
-  const sleepHours = latestSleep?.total_sleep_duration != null
-    ? (latestSleep.total_sleep_duration / 3600).toFixed(1)
-    : null;
+  const latestSleep = sleepList[sleepList.length - 1];
+  const sleepHours =
+    latestSleep?.total_sleep_duration != null
+      ? (latestSleep.total_sleep_duration / 3600).toFixed(1)
+      : null;
   const isEmpty = sleepList.length === 0 && activityList.length === 0;
+
+  const sleepChart = sleepList
+    .map((s: any) => {
+      const d = s.calendar_date || (typeof s.date === "string" ? s.date.slice(0, 10) : null);
+      if (!d) return null;
+      const hours =
+        s.total_sleep_duration != null ? s.total_sleep_duration / 3600 : null;
+      return { date: d, hours };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => (a.date < b.date ? -1 : 1));
+
+  const activityChart = activityList
+    .map((a: any) => {
+      const d =
+        a.calendar_date || (typeof a.date === "string" ? a.date.slice(0, 10) : null);
+      if (!d) return null;
+      return { date: d, steps: a.steps ?? null };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => (a.date < b.date ? -1 : 1));
 
   return (
     <main className="flex flex-1 flex-col gap-6 py-4 sm:py-6">
@@ -165,6 +208,11 @@ export default function WhoopPage() {
           {error && !loading && (
             <p className="text-xs font-medium text-rose-300">{error}</p>
           )}
+          {error && errorDetails && !loading && (
+            <pre className="mt-3 max-h-80 overflow-auto rounded-xl bg-slate-900/80 p-3 text-[10px] text-rose-200">
+              {JSON.stringify(errorDetails, null, 2)}
+            </pre>
+          )}
 
           {!loading && !error && data && (
             <div className="space-y-4">
@@ -180,6 +228,40 @@ export default function WhoopPage() {
                     {data.message}
                   </p>
                 )}
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                <div>
+                  <label className="mb-1 block text-[10px] text-slate-400">
+                    Start date
+                  </label>
+                  <input
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    type="date"
+                    className="w-full rounded-xl border border-slate-800/80 bg-slate-900/40 px-2 py-1 text-xs text-slate-200 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] text-slate-400">
+                    End date
+                  </label>
+                  <input
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    type="date"
+                    className="w-full rounded-xl border border-slate-800/80 bg-slate-900/40 px-2 py-1 text-xs text-slate-200 outline-none"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={() => loadHistory(startDate, endDate)}
+                    disabled={historyLoading}
+                    className="inline-flex items-center gap-1 rounded-full bg-indigo-500 px-4 py-2 text-xs font-medium text-slate-950 shadow-lg shadow-indigo-500/40 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:bg-slate-600"
+                  >
+                    {historyLoading ? "Loading…" : "Load history"}
+                  </button>
+                </div>
               </div>
 
               <div className="rounded-xl border border-slate-800/80 bg-slate-950/70 p-3">
@@ -211,6 +293,86 @@ export default function WhoopPage() {
                   <p className="mt-1 text-slate-300/80">
                     Connect WHOOP for your Junction user via Junction Link, then wait a few minutes for the first sync. Use the &quot;Connect WHOOP&quot; button on the Wearables page to get the link.
                   </p>
+                </div>
+              )}
+
+              {!isEmpty && (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-slate-800/80 bg-slate-950/70 p-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      Sleep hours (history)
+                    </p>
+                    <div className="mt-2 h-56">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={sleepChart}>
+                          <XAxis
+                            dataKey="date"
+                            tickLine={false}
+                            tick={{ fontSize: 10, fill: "#94a3b8" }}
+                          />
+                          <YAxis
+                            tickLine={false}
+                            tick={{ fontSize: 10, fill: "#94a3b8" }}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              background: "#020617",
+                              borderRadius: 12,
+                              border: "1px solid rgba(148,163,184,0.5)",
+                              fontSize: 11,
+                            }}
+                            labelStyle={{ color: "#e5e7eb" }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="hours"
+                            stroke="#22c55e"
+                            strokeWidth={2}
+                            dot={{ r: 2 }}
+                            activeDot={{ r: 4 }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-800/80 bg-slate-950/70 p-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                      Steps (history)
+                    </p>
+                    <div className="mt-2 h-56">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={activityChart}>
+                          <XAxis
+                            dataKey="date"
+                            tickLine={false}
+                            tick={{ fontSize: 10, fill: "#94a3b8" }}
+                          />
+                          <YAxis
+                            tickLine={false}
+                            tick={{ fontSize: 10, fill: "#94a3b8" }}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              background: "#020617",
+                              borderRadius: 12,
+                              border: "1px solid rgba(148,163,184,0.5)",
+                              fontSize: 11,
+                            }}
+                            labelStyle={{ color: "#e5e7eb" }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="steps"
+                            stroke="#38bdf8"
+                            strokeWidth={2}
+                            dot={{ r: 2 }}
+                            activeDot={{ r: 4 }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
                 </div>
               )}
 

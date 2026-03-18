@@ -1,6 +1,10 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import { useSearchParams } from "next/navigation";
+import BodySilhouette, {
+  type BodyRegionId,
+} from "../body/BodySilhouette";
 
 const SECTIONS = [
   { id: "summary", label: "Summary", grade: "◎" },
@@ -20,6 +24,8 @@ const SECTIONS = [
   { id: "toxin", label: "Toxin Exposure", grade: "○" },
 ];
 
+const SECTION_IDS = new Set(SECTIONS.map((s) => s.id));
+
 const SECTION_BLURBS: Record<string, string> = {
   summary: "Your records summarize how each system of your body is performing today.",
   heart: "Lipids, blood pressure, and cardiovascular risk markers.",
@@ -36,6 +42,15 @@ const SECTION_BLURBS: Record<string, string> = {
   brain: "Markers that support brain health and mood.",
   gut: "Gut health and digestion-related markers.",
   toxin: "Exposure and detoxification markers.",
+};
+
+const BODY_REGION_FOR_SECTION: Partial<Record<string, BodyRegionId>> = {
+  brain: "brain",
+  thyroid: "thyroid",
+  heart: "heart",
+  liver: "liver",
+  kidney: "kidney",
+  metabolic: "metabolic",
 };
 
 type Biomarker = {
@@ -56,7 +71,26 @@ type ExtractResponse = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
 
-function BiomarkerSlider({ b }: { b: Biomarker }) {
+type BiomarkerExplanation = {
+  name: string;
+  whatItIs: string;
+  whyItMatters: string;
+  whatHighMeans: string;
+  whatLowMeans: string;
+  whatBorderlineMeans: string;
+  normalMeans: string;
+  practicalNotes: string[];
+  questionsForClinician: string[];
+  disclaimer: string;
+};
+
+function BiomarkerSlider({
+  b,
+  onClick,
+}: {
+  b: Biomarker;
+  onClick: () => void;
+}) {
   const refMin = b.refMin ?? null;
   const refMax = b.refMax ?? null;
   const numValue = Number(b.value);
@@ -76,7 +110,20 @@ function BiomarkerSlider({ b }: { b: Biomarker }) {
     "text-emerald-600";
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onClick();
+        if (e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className="cursor-pointer rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-3 hover:bg-slate-100"
+      title="Click for more information"
+    >
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-sm font-medium text-slate-900">{b.name}</span>
         <span className={`text-sm font-semibold ${statusColor}`}>
@@ -121,6 +168,15 @@ export default function DataPage() {
   const [biomarkers, setBiomarkers] = useState<Biomarker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [infoLoading, setInfoLoading] = useState(false);
+  const [infoError, setInfoError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Biomarker | null>(null);
+  const [explanation, setExplanation] = useState<BiomarkerExplanation | null>(
+    null
+  );
+
+  const searchParams = useSearchParams();
 
   const refresh = async () => {
     setLoading(true);
@@ -150,6 +206,52 @@ export default function DataPage() {
   useEffect(() => {
     refresh();
   }, []);
+
+  // Allow deep-linking: /data?section=thyroid (etc).
+  useEffect(() => {
+    const section = searchParams.get("section");
+    if (!section) return;
+    if (SECTION_IDS.has(section)) setActive(section);
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!infoOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setInfoOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [infoOpen]);
+
+  const openInfo = async (b: Biomarker) => {
+    setSelected(b);
+    setExplanation(null);
+    setInfoError(null);
+    setInfoOpen(true);
+    setInfoLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/biomarker/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: b.name,
+          status: b.status,
+          unit: b.unit,
+          referenceRange: b.referenceRange,
+          category: b.category,
+        }),
+      });
+      const json = (await res.json()) as { explanation?: BiomarkerExplanation; error?: string };
+      if (!res.ok) {
+        throw new Error(json.error || "Failed to load biomarker explanation");
+      }
+      setExplanation(json.explanation ?? null);
+    } catch (e: unknown) {
+      setInfoError(e instanceof Error ? e.message : "Request failed");
+    } finally {
+      setInfoLoading(false);
+    }
+  };
 
   const bySection = useMemo(() => {
     const map: Record<string, Biomarker[]> = {};
@@ -204,12 +306,10 @@ export default function DataPage() {
 
       <div className="flex flex-1 gap-10 pt-4">
         <div className="flex w-64 items-start justify-center">
-          <div className="relative flex h-80 w-32 items-center justify-center">
-            <div className="h-72 w-24 rounded-full bg-gradient-to-b from-white via-slate-50 to-slate-200 shadow-[0_20px_45px_rgba(15,23,42,0.10)]" />
-            {active === "metabolic" && (
-              <div className="pointer-events-none absolute left-1/2 top-1/2 h-16 w-20 -translate-x-1/2 -translate-y-1/2 rounded-full bg-amber-300/70 blur-[6px] opacity-90" />
-            )}
-          </div>
+          <BodySilhouette
+            active={BODY_REGION_FOR_SECTION[active] ?? null}
+            onSelect={(id) => setActive(id)}
+          />
         </div>
 
         <section className="flex-1">
@@ -233,7 +333,11 @@ export default function DataPage() {
             {!loading && activeBiomarkers.length > 0 && (
               <div className="mt-4 space-y-3">
                 {activeBiomarkers.map((b) => (
-                  <BiomarkerSlider key={`${b.name}-${b.value}`} b={b} />
+                  <BiomarkerSlider
+                    key={`${b.name}-${b.value}-${b.unit}`}
+                    b={b}
+                    onClick={() => openInfo(b)}
+                  />
                 ))}
               </div>
             )}
@@ -248,6 +352,133 @@ export default function DataPage() {
           </div>
         </section>
       </div>
+
+      {/* Info modal */}
+      {infoOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setInfoOpen(false);
+          }}
+        >
+          <div className="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-2xl bg-white p-6 shadow-lg ring-1 ring-slate-200">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">
+                  {selected?.name ?? "Biomarker"}
+                </h2>
+                {selected && (
+                  <p className="mt-1 text-xs text-slate-600">
+                    {selected.value} {selected.unit} · Status: {selected.status}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setInfoOpen(false)}
+                className="rounded-full px-3 py-1 text-xs text-slate-500 hover:bg-slate-100"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4">
+              {infoLoading && (
+                <p className="text-sm text-slate-600">Loading details…</p>
+              )}
+              {infoError && (
+                <p className="text-sm font-medium text-red-600">{infoError}</p>
+              )}
+
+              {!infoLoading && !infoError && explanation && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      What it is
+                    </h3>
+                    <p className="mt-1 text-sm text-slate-700">
+                      {explanation.whatItIs}
+                    </p>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Why it matters
+                    </h3>
+                    <p className="mt-1 text-sm text-slate-700">
+                      {explanation.whyItMatters}
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        If high
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-700">
+                        {explanation.whatHighMeans}
+                      </p>
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        If low
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-700">
+                        {explanation.whatLowMeans}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        If borderline
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-700">
+                        {explanation.whatBorderlineMeans}
+                      </p>
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        In normal range
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-700">
+                        {explanation.normalMeans}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Practical notes
+                    </h3>
+                    <ul className="mt-2 list-disc pl-5 text-sm text-slate-700">
+                      {(explanation.practicalNotes ?? []).map((n, idx) => (
+                        <li key={`${idx}-${n}`}>{n}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Questions for your clinician
+                    </h3>
+                    <ul className="mt-2 list-disc pl-5 text-sm text-slate-700">
+                      {(explanation.questionsForClinician ?? []).map((q, idx) => (
+                        <li key={`${idx}-${q}`}>{q}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <p className="text-xs text-slate-500">
+                    {explanation.disclaimer}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
